@@ -1,123 +1,152 @@
 import yfinance as yf
-import numpy as np
 import pandas as pd
+import numpy as np
 from ta.momentum import RSIIndicator
 from sklearn.ensemble import RandomForestClassifier
 from telegram import Bot
 import time
 
-# --------------------------------
-# TELEGRAM CONFIG
-# --------------------------------
+# -----------------------------
+# TELEGRAM SETTINGS
+# -----------------------------
 TOKEN = "8043643820:AAFOd4Aa1nfOjwekOpTCsCOhJN-xAXuMN3w"
 CHAT_ID = "8250122936"
 
 bot = Bot(token=TOKEN)
 
-# --------------------------------
-# GET MARKET DATA
-# --------------------------------
+# -----------------------------
+# DOWNLOAD DATA
+# -----------------------------
 def get_data(symbol="AAPL"):
-    df = yf.download(symbol, period="6mo", interval="1h")
 
-    if df.empty:
+    df = yf.download(
+        tickers=symbol,
+        period="1mo",
+        interval="1h",
+        progress=False
+    )
+
+    if df is None or df.empty:
         return None
+
+    df = df.reset_index()
+
+    if "Close" not in df.columns:
+        return None
+
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
 
     df.dropna(inplace=True)
 
-    close_prices = df["Close"].squeeze()
+    if len(df) < 20:
+        return None
 
-    df["rsi"] = RSIIndicator(close_prices).rsi()
+    close_series = pd.Series(df["Close"].values.flatten())
+
+    df["rsi"] = RSIIndicator(close_series).rsi()
 
     df["future"] = df["Close"].shift(-3)
 
-    df["target"] = np.where(df["future"] > df["Close"], 1, 0)
+    df["target"] = np.where(
+        df["future"] > df["Close"],
+        1,
+        0
+    )
 
     df.dropna(inplace=True)
 
     return df
 
-# --------------------------------
-# TRAIN AI MODEL
-# --------------------------------
+# -----------------------------
+# TRAIN MODEL
+# -----------------------------
 def train_model(df):
+
     X = df[["Close", "Volume", "rsi"]]
     y = df["target"]
 
-    model = RandomForestClassifier(n_estimators=150)
+    model = RandomForestClassifier(
+        n_estimators=100,
+        random_state=42
+    )
 
     model.fit(X, y)
 
     return model
 
-# --------------------------------
+# -----------------------------
 # GENERATE SIGNAL
-# --------------------------------
+# -----------------------------
 def generate_signal(model, df):
 
-    latest = np.array([
-        df.iloc[-1]["Close"],
-        df.iloc[-1]["Volume"],
-        df.iloc[-1]["rsi"]
-    ]).reshape(1, -1)
+    latest = pd.DataFrame([{
+        "Close": df.iloc[-1]["Close"],
+        "Volume": df.iloc[-1]["Volume"],
+        "rsi": df.iloc[-1]["rsi"]
+    }])
 
     prediction = model.predict(latest)[0]
 
-    prob = model.predict_proba(latest)[0][prediction]
+    probability = model.predict_proba(latest)[0][prediction]
 
-    if prediction == 1 and prob > 0.75:
-        return "BUY", prob
+    if probability < 0.75:
+        return "WAIT", probability
 
-    elif prediction == 0 and prob > 0.75:
-        return "SELL", prob
+    if prediction == 1:
+        return "BUY", probability
 
-    else:
-        return "WAIT", prob
+    return "SELL", probability
 
-# --------------------------------
+# -----------------------------
 # SEND TELEGRAM MESSAGE
-# --------------------------------
-def send_message(symbol, signal, confidence):
+# -----------------------------
+def send_signal(symbol, signal, confidence):
 
-    message = f'''
+    text = f"""
 📊 AI TRADING SIGNAL
 
-Symbol: {symbol}
-
-Signal: {signal}
-
-Confidence: {round(confidence * 100, 2)}%
-'''
+📈 Symbol: {symbol}
+📌 Signal: {signal}
+🧠 Confidence: {round(confidence * 100, 2)}%
+"""
 
     bot.send_message(
         chat_id=CHAT_ID,
-        text=message
+        text=text
     )
 
-# --------------------------------
+# -----------------------------
 # MAIN LOOP
-# --------------------------------
-symbol = "AAPL"
+# -----------------------------
+SYMBOL = "AAPL"
 
 while True:
 
     try:
 
-        df = get_data(symbol)
+        print("Downloading market data...")
+
+        df = get_data(SYMBOL)
 
         if df is None:
-            print("No data received")
+            print("No valid market data")
             time.sleep(60)
             continue
 
+        print("Training AI model...")
+
         model = train_model(df)
 
-        signal, conf = generate_signal(model, df)
+        signal, confidence = generate_signal(model, df)
 
-        print(signal, conf)
+        print(signal, confidence)
 
         if signal != "WAIT":
-            send_message(symbol, signal, conf)
+            send_signal(
+                SYMBOL,
+                signal,
+                confidence
+            )
 
     except Exception as e:
         print("ERROR:", e)
